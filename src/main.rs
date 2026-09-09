@@ -14,9 +14,10 @@ use std::{
 };
 use tapo::{ApiClient, Error, HandlerExt, TapoResponseError};
 
-const CONTROLS: &str = "Left: white / 3000K · Middle: 3000K\nRight: on/off · Scroll: brightness ±5%\nColor and brightness controls turn the LED on.";
-const WARM_TEMPERATURE: u16 = 3000;
-const WARM_SWATCH: &str = "#ffb46b";
+const CONTROLS: &str = "Left: white / warm · Middle: warm\nRight: on/off · Scroll: brightness ±5%\nColor and brightness controls turn the LED on.";
+const WARM_HUE: u16 = 20;
+const WARM_SATURATION: u8 = 80;
+const WARM_VALUE: u8 = 100;
 
 #[derive(Deserialize, Serialize)]
 struct Config {
@@ -162,20 +163,21 @@ impl State {
             );
         }
         if self.color_temp > 0 {
-            let text = if self.color_temp == WARM_TEMPERATURE {
-                format!("<span foreground=\"{WARM_SWATCH}\">●</span>")
-            } else {
-                "●".to_owned()
-            };
             return output(
-                text,
+                "●",
                 "on",
                 format!("{detail}\nColor temperature: {}K", self.color_temp),
             );
         }
         if let Some((h, s)) = self.color() {
             let color = color_hex(h, s);
-            let label = if s == 0 { "White" } else { "Custom" };
+            let label = if s == 0 {
+                "White"
+            } else if (h, s) == (WARM_HUE, u16::from(WARM_SATURATION)) {
+                "Warm"
+            } else {
+                "Custom"
+            };
             output(
                 format!("<span foreground=\"{color}\">●</span>"),
                 "on",
@@ -221,11 +223,11 @@ fn payload(state: &State, action: Action) -> Result<Value, &'static str> {
             )
         }
         Action::Color | Action::Warm => {
-            if action == Action::Warm || state.color_temp != WARM_TEMPERATURE {
-                Ok(
-                    json!({"device_on":true,"brightness":state.brightness.clamp(1,100),
-                    "color_temp":WARM_TEMPERATURE}),
-                )
+            let is_warm = state.color_temp == 0
+                && state.color() == Some((WARM_HUE, u16::from(WARM_SATURATION)));
+            if action == Action::Warm || !is_warm {
+                Ok(json!({"device_on":true,"brightness":WARM_VALUE,
+                    "color_temp":0,"hue":WARM_HUE,"saturation":WARM_SATURATION}))
             } else {
                 // RGB white is represented by zero saturation. The library's
                 // builder rejects that value, but the authenticated API accepts it.
@@ -425,11 +427,13 @@ mod tests {
         let out = s.describe();
         assert!(out.text.contains("#0000ff"));
         assert!(out.tooltip.contains("LED &lt;home&gt;&amp;"));
-        s.color_temp = WARM_TEMPERATURE;
-        let out = s.describe();
-        assert!(out.text.contains(WARM_SWATCH));
-        assert!(out.tooltip.contains("3000K"));
         s.color_temp = 0;
+        s.brightness = WARM_VALUE;
+        s.hue = Some(WARM_HUE);
+        s.saturation = Some(u16::from(WARM_SATURATION));
+        let out = s.describe();
+        assert!(out.text.contains("#ff7733"));
+        assert!(out.tooltip.contains("near Warm"));
         s.device_on = false;
         assert_eq!(s.describe().class, "off");
         s.device_on = true;
@@ -450,12 +454,14 @@ mod tests {
     #[test]
     fn actions_preserve_brightness_and_white() {
         let mut s = state();
-        assert_eq!(
-            payload(&s, Action::Color).unwrap()["color_temp"],
-            WARM_TEMPERATURE
-        );
-        assert_eq!(payload(&s, Action::Warm).unwrap()["brightness"], 50);
-        s.color_temp = WARM_TEMPERATURE;
+        let p = payload(&s, Action::Color).unwrap();
+        assert_eq!(p["hue"], WARM_HUE);
+        assert_eq!(p["saturation"], WARM_SATURATION);
+        assert_eq!(p["brightness"], WARM_VALUE);
+        assert_eq!(payload(&s, Action::Warm).unwrap()["brightness"], WARM_VALUE);
+        s.color_temp = 0;
+        s.hue = Some(WARM_HUE);
+        s.saturation = Some(u16::from(WARM_SATURATION));
         let p = payload(&s, Action::Color).unwrap();
         assert_eq!(p["saturation"], 0);
         assert_eq!(p["color_temp"], 0);
@@ -464,7 +470,9 @@ mod tests {
         s.hue = Some(0);
         s.saturation = Some(0);
         let p = payload(&s, Action::Color).unwrap();
-        assert_eq!(p["color_temp"], WARM_TEMPERATURE);
+        assert_eq!(p["hue"], WARM_HUE);
+        assert_eq!(p["saturation"], WARM_SATURATION);
+        assert_eq!(p["brightness"], WARM_VALUE);
     }
     #[test]
     fn bounds_power_and_effect_guard() {
