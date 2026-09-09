@@ -14,8 +14,9 @@ use std::{
 };
 use tapo::{ApiClient, Error, HandlerExt, TapoResponseError};
 
-const CONTROLS: &str = "Left: white / 1800K · Middle: 1800K\nRight: on/off · Scroll: brightness ±5%\nColor and brightness controls turn the LED on.";
-const PALETTE: [(&str, u16, u8); 2] = [("1800K", 24, 100), ("White", 0, 0)];
+const CONTROLS: &str = "Left: white / 3000K · Middle: 3000K\nRight: on/off · Scroll: brightness ±5%\nColor and brightness controls turn the LED on.";
+const WARM_TEMPERATURE: u16 = 3000;
+const WARM_SWATCH: &str = "#ffb46b";
 
 #[derive(Deserialize, Serialize)]
 struct Config {
@@ -161,21 +162,20 @@ impl State {
             );
         }
         if self.color_temp > 0 {
+            let text = if self.color_temp == WARM_TEMPERATURE {
+                format!("<span foreground=\"{WARM_SWATCH}\">●</span>")
+            } else {
+                "●".to_owned()
+            };
             return output(
-                "●",
+                text,
                 "on",
-                format!("{detail}\nWhite mode: {} K", self.color_temp),
+                format!("{detail}\nColor temperature: {}K", self.color_temp),
             );
         }
         if let Some((h, s)) = self.color() {
             let color = color_hex(h, s);
-            let label = if s == 0 {
-                "White"
-            } else if (h, s) == (24, 100) {
-                "1800K"
-            } else {
-                "Custom"
-            };
+            let label = if s == 0 { "White" } else { "Custom" };
             output(
                 format!("<span foreground=\"{color}\">●</span>"),
                 "on",
@@ -204,25 +204,6 @@ fn color_hex(h: u16, s: u16) -> String {
     let channel = |c: f64| ((c + 1. - s) * 255.).round() as u8;
     format!("#{:02x}{:02x}{:02x}", channel(r), channel(g), channel(b))
 }
-fn nearest_color(h: u16, s: u16) -> usize {
-    let point = |h: u16, s: u16| {
-        let a = f64::from(h).to_radians();
-        (f64::from(s) * a.cos(), f64::from(s) * a.sin())
-    };
-    let (x, y) = point(h, s);
-    PALETTE
-        .iter()
-        .enumerate()
-        .min_by(|(_, a), (_, b)| {
-            let distance = |p: &(&str, u16, u8)| {
-                let (px, py) = point(p.1, u16::from(p.2));
-                (px - x).powi(2) + (py - y).powi(2)
-            };
-            distance(a).total_cmp(&distance(b))
-        })
-        .map(|(i, _)| i)
-        .unwrap_or(0)
-}
 fn payload(state: &State, action: Action) -> Result<Value, &'static str> {
     if action == Action::Toggle {
         return Ok(json!({"device_on": !state.device_on}));
@@ -240,21 +221,19 @@ fn payload(state: &State, action: Action) -> Result<Value, &'static str> {
             )
         }
         Action::Color | Action::Warm => {
-            let index = if action == Action::Warm {
-                0
+            if action == Action::Warm || state.color_temp != WARM_TEMPERATURE {
+                Ok(
+                    json!({"device_on":true,"brightness":state.brightness.clamp(1,100),
+                    "color_temp":WARM_TEMPERATURE}),
+                )
             } else {
-                let (h, s) = state
-                    .color()
-                    .ok_or("Device did not report a usable color.")?;
-                (nearest_color(h, s) + 1) % PALETTE.len()
-            };
-            let (_, h, s) = PALETTE[index];
-            // The library's hue_saturation builder rejects saturation=0. The
-            // authenticated API accepts it, and L900 needs it for RGB white.
-            Ok(
-                json!({"device_on":true,"brightness":state.brightness.clamp(1,100),
-                "color_temp":0,"hue":h,"saturation":s}),
-            )
+                // RGB white is represented by zero saturation. The library's
+                // builder rejects that value, but the authenticated API accepts it.
+                Ok(
+                    json!({"device_on":true,"brightness":state.brightness.clamp(1,100),
+                    "color_temp":0,"hue":0,"saturation":0}),
+                )
+            }
         }
         _ => Err("Status does not change the device."),
     }
@@ -446,6 +425,11 @@ mod tests {
         let out = s.describe();
         assert!(out.text.contains("#0000ff"));
         assert!(out.tooltip.contains("LED &lt;home&gt;&amp;"));
+        s.color_temp = WARM_TEMPERATURE;
+        let out = s.describe();
+        assert!(out.text.contains(WARM_SWATCH));
+        assert!(out.tooltip.contains("3000K"));
+        s.color_temp = 0;
         s.device_on = false;
         assert_eq!(s.describe().class, "off");
         s.device_on = true;
@@ -462,23 +446,25 @@ mod tests {
         assert_eq!(color_hex(240, 100), "#0000ff");
         assert_eq!(color_hex(360, 100), "#ff0000");
         assert_eq!(color_hex(240, 0), "#ffffff");
-        assert_eq!(nearest_color(123, 0), 1);
     }
     #[test]
     fn actions_preserve_brightness_and_white() {
         let mut s = state();
-        assert_eq!(payload(&s, Action::Color).unwrap()["hue"], 24);
+        assert_eq!(
+            payload(&s, Action::Color).unwrap()["color_temp"],
+            WARM_TEMPERATURE
+        );
         assert_eq!(payload(&s, Action::Warm).unwrap()["brightness"], 50);
-        s.hue = Some(24);
-        s.saturation = Some(100);
+        s.color_temp = WARM_TEMPERATURE;
         let p = payload(&s, Action::Color).unwrap();
         assert_eq!(p["saturation"], 0);
         assert_eq!(p["color_temp"], 0);
+        assert_eq!(p["hue"], 0);
+        s.color_temp = 0;
         s.hue = Some(0);
         s.saturation = Some(0);
         let p = payload(&s, Action::Color).unwrap();
-        assert_eq!(p["hue"], 24);
-        assert_eq!(p["saturation"], 100);
+        assert_eq!(p["color_temp"], WARM_TEMPERATURE);
     }
     #[test]
     fn bounds_power_and_effect_guard() {
