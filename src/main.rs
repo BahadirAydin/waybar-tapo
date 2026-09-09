@@ -14,18 +14,8 @@ use std::{
 };
 use tapo::{ApiClient, Error, HandlerExt, TapoResponseError};
 
-const CONTROLS: &str = "Left: next color · Middle: warm\nRight: on/off · Scroll: brightness ±5%\nColor and brightness controls turn the LED on.";
-const PALETTE: [(&str, u16, u8); 9] = [
-    ("Warm", 30, 65),
-    ("White", 0, 0),
-    ("Red", 0, 100),
-    ("Amber", 40, 100),
-    ("Green", 120, 100),
-    ("Cyan", 180, 100),
-    ("Blue", 240, 100),
-    ("Purple", 280, 100),
-    ("Pink", 330, 75),
-];
+const CONTROLS: &str = "Left: white / orange · Middle: orange\nRight: on/off · Scroll: brightness ±5%\nColor and brightness controls turn the LED on.";
+const PALETTE: [(&str, u16, u8); 2] = [("Orange", 30, 65), ("White", 0, 0)];
 
 #[derive(Deserialize, Serialize)]
 struct Config {
@@ -179,7 +169,13 @@ impl State {
         }
         if let Some((h, s)) = self.color() {
             let color = color_hex(h, s);
-            let label = PALETTE[nearest_color(h, s)].0;
+            let label = if s == 0 {
+                "White"
+            } else if (h, s) == (30, 65) {
+                "Orange"
+            } else {
+                "Custom"
+            };
             output(
                 format!("<span foreground=\"{color}\">●</span>"),
                 "on",
@@ -471,16 +467,18 @@ mod tests {
     #[test]
     fn actions_preserve_brightness_and_white() {
         let mut s = state();
-        assert_eq!(payload(&s, Action::Color).unwrap()["hue"], 280);
+        assert_eq!(payload(&s, Action::Color).unwrap()["hue"], 30);
         assert_eq!(payload(&s, Action::Warm).unwrap()["brightness"], 50);
         s.hue = Some(30);
         s.saturation = Some(65);
         let p = payload(&s, Action::Color).unwrap();
         assert_eq!(p["saturation"], 0);
         assert_eq!(p["color_temp"], 0);
-        s.hue = Some(330);
-        s.saturation = Some(75);
-        assert_eq!(payload(&s, Action::Color).unwrap()["hue"], 30);
+        s.hue = Some(0);
+        s.saturation = Some(0);
+        let p = payload(&s, Action::Color).unwrap();
+        assert_eq!(p["hue"], 30);
+        assert_eq!(p["saturation"], 65);
     }
     #[test]
     fn bounds_power_and_effect_guard() {

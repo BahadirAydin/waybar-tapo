@@ -28,10 +28,11 @@ Use `waybar-tapo --set-ip ADDRESS` after a DHCP address change.
 
 ## Commands
 
-Running without arguments returns status. `color` cycles the palette, `warm`
-selects a warm color, `toggle` changes power, and `brighter`/`dimmer` adjust
-brightness by five percentage points. Brightness is kept between 1 and 100
-percent. Requests are serialized so fast scrolling does not queue changes.
+Running without arguments returns status. `color` switches between white and a
+warm orange; `warm` selects orange directly. `toggle` changes power, and
+`brighter`/`dimmer` adjust brightness by five percentage points. Brightness is
+kept between 1 and 100 percent. Requests are serialized so fast scrolling does
+not queue changes.
 
 The companion Waybar configuration and setup script live in the
 [dotfiles repository](https://github.com/BahadirAydin/dotfiles) under
