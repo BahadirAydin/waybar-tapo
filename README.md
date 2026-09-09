@@ -31,7 +31,7 @@ Use `waybar-tapo --set-ip ADDRESS` after a DHCP address change.
 Running without arguments returns status. `color` switches between white and an
 1800K-style warm orange; `warm` selects the warm color directly. The L900 only
 accepts 2500–6500K in color-temperature mode, so 1800K is approximated in RGB
-as HSV `(30, 100)`. `toggle` changes power, and
+as HSV `(24, 100)`. `toggle` changes power, and
 `brighter`/`dimmer` adjust brightness by five percentage points. Brightness is
 kept between 1 and 100 percent. Requests are serialized so fast scrolling does
 not queue changes.
