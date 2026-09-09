@@ -14,8 +14,8 @@ use std::{
 };
 use tapo::{ApiClient, Error, HandlerExt, TapoResponseError};
 
-const CONTROLS: &str = "Left: white / orange · Middle: orange\nRight: on/off · Scroll: brightness ±5%\nColor and brightness controls turn the LED on.";
-const PALETTE: [(&str, u16, u8); 2] = [("Orange", 30, 65), ("White", 0, 0)];
+const CONTROLS: &str = "Left: white / 1800K · Middle: 1800K\nRight: on/off · Scroll: brightness ±5%\nColor and brightness controls turn the LED on.";
+const PALETTE: [(&str, u16, u8); 2] = [("1800K", 30, 100), ("White", 0, 0)];
 
 #[derive(Deserialize, Serialize)]
 struct Config {
@@ -171,8 +171,8 @@ impl State {
             let color = color_hex(h, s);
             let label = if s == 0 {
                 "White"
-            } else if (h, s) == (30, 65) {
-                "Orange"
+            } else if (h, s) == (30, 100) {
+                "1800K"
             } else {
                 "Custom"
             };
@@ -470,7 +470,7 @@ mod tests {
         assert_eq!(payload(&s, Action::Color).unwrap()["hue"], 30);
         assert_eq!(payload(&s, Action::Warm).unwrap()["brightness"], 50);
         s.hue = Some(30);
-        s.saturation = Some(65);
+        s.saturation = Some(100);
         let p = payload(&s, Action::Color).unwrap();
         assert_eq!(p["saturation"], 0);
         assert_eq!(p["color_temp"], 0);
@@ -478,7 +478,7 @@ mod tests {
         s.saturation = Some(0);
         let p = payload(&s, Action::Color).unwrap();
         assert_eq!(p["hue"], 30);
-        assert_eq!(p["saturation"], 65);
+        assert_eq!(p["saturation"], 100);
     }
     #[test]
     fn bounds_power_and_effect_guard() {
