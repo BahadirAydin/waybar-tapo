@@ -6,7 +6,7 @@ use std::{
     env,
     fs::{self, File, OpenOptions},
     io::{self, Write},
-    net::IpAddr,
+    net::{IpAddr, UdpSocket},
     os::unix::fs::OpenOptionsExt,
     path::{Path, PathBuf},
     process::Command,
@@ -18,6 +18,15 @@ const CONTROLS: &str = "Left: white / warm · Middle: warm\nRight: on/off · Scr
 const WARM_HUE: u16 = 20;
 const WARM_SATURATION: u8 = 80;
 const WARM_VALUE: u8 = 100;
+// TP-Link TDP probe: version 2, op_code 1 (probe), empty payload. The last
+// four bytes are the CRC32 of the header with 0x5a6b7c8d sitting in that slot,
+// so the whole query is a constant and needs no key exchange. Devices reply to
+// the source port with a 16-byte header followed by plaintext JSON.
+const DISCOVERY_QUERY: [u8; 16] = [
+    0x02, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x46, 0x3c, 0xb5, 0xd3,
+];
+const DISCOVERY_PORT: u16 = 20002;
+const DISCOVERY_WINDOW: Duration = Duration::from_secs(2);
 
 #[derive(Deserialize, Serialize)]
 struct Config {
@@ -39,6 +48,72 @@ impl Config {
         }
         Ok(cfg)
     }
+}
+
+#[derive(Deserialize)]
+struct Discovered {
+    #[serde(default)]
+    ip: String,
+    device_model: String,
+    #[serde(default)]
+    mac: String,
+}
+impl Discovered {
+    fn is_l900(&self) -> bool {
+        self.device_model.starts_with("L900")
+    }
+}
+fn parse_discovery(datagram: &[u8], src: IpAddr) -> Option<Discovered> {
+    let value: Value = serde_json::from_slice(datagram.get(16..)?).ok()?;
+    let mut found: Discovered = serde_json::from_value(value.get("result")?.clone()).ok()?;
+    if found.ip.trim().is_empty() {
+        found.ip = src.to_string();
+    }
+    Some(found)
+}
+/// Broadcast one probe and collect replies. This blocks, which is fine: the
+/// runtime is single-threaded and nothing else is in flight while it runs.
+fn discover(window: Duration, stop_at_strip: bool) -> io::Result<Vec<Discovered>> {
+    let socket = UdpSocket::bind(("0.0.0.0", 0))?;
+    socket.set_broadcast(true)?;
+    socket.set_read_timeout(Some(Duration::from_millis(200)))?;
+    socket.send_to(&DISCOVERY_QUERY, ("255.255.255.255", DISCOVERY_PORT))?;
+    let deadline = Instant::now() + window;
+    let mut found: Vec<Discovered> = Vec::new();
+    let mut buf = [0; 2048];
+    while Instant::now() < deadline {
+        let (read, from) = match socket.recv_from(&mut buf) {
+            Ok(v) => v,
+            Err(e)
+                if matches!(
+                    e.kind(),
+                    io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
+                ) =>
+            {
+                continue;
+            }
+            Err(e) => return Err(e),
+        };
+        let Some(device) = parse_discovery(&buf[..read], from.ip()) else {
+            continue;
+        };
+        if found.iter().any(|d| d.ip == device.ip) {
+            continue;
+        }
+        let strip = device.is_l900();
+        found.push(device);
+        // The strip answers in milliseconds; no reason to hold the whole window.
+        if strip && stop_at_strip {
+            break;
+        }
+    }
+    Ok(found)
+}
+fn discover_l900(window: Duration) -> Option<Discovered> {
+    discover(window, true)
+        .ok()?
+        .into_iter()
+        .find(Discovered::is_l900)
 }
 
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -250,10 +325,10 @@ fn api_error(err: Error) -> Output {
         _ => failure("Tapo request failed. Check the device, credentials and local connection."),
     }
 }
-async fn request(cfg: Config, action: Action) -> Result<Output, Error> {
-    let device = ApiClient::new(cfg.username, cfg.password)
+async fn request(cfg: &Config, action: Action) -> Result<Output, Error> {
+    let device = ApiClient::new(cfg.username.clone(), cfg.password.clone())
         .with_timeout(Duration::from_secs(4))
-        .l900(cfg.device_ip)
+        .l900(cfg.device_ip.clone())
         .await?;
     // `debug` exposes full device info, including optional effect fields. No
     // logger is installed; credentials and raw device data are never printed.
@@ -271,16 +346,37 @@ async fn request(cfg: Config, action: Action) -> Result<Output, Error> {
     }
     Ok(state.describe())
 }
-async fn query(action: Action) -> Output {
-    let cfg = match Config::read(&config_path()) {
-        Ok(c) => c,
-        Err(e) => return failure(e),
-    };
+async fn attempt(cfg: &Config, action: Action) -> Output {
     match tokio::time::timeout(Duration::from_secs(8), request(cfg, action)).await {
         Ok(Ok(out)) => out,
         Ok(Err(e)) => api_error(e),
         Err(_) => offline(),
     }
+}
+async fn query(action: Action) -> Output {
+    let path = config_path();
+    let mut cfg = match Config::read(&path) {
+        Ok(c) => c,
+        Err(e) => return failure(e),
+    };
+    let first = attempt(&cfg, action).await;
+    // A new DHCP lease leaves the stored address dead while the strip is still
+    // on the network. Re-probe only on that failure, and only adopt an address
+    // that differs from the one just tried.
+    if first.class != "offline" {
+        return first;
+    }
+    let Some(found) = discover_l900(DISCOVERY_WINDOW) else {
+        return first;
+    };
+    if found.ip == cfg.device_ip {
+        return first;
+    }
+    cfg.device_ip = found.ip;
+    if let Err(e) = write_config(&path, &cfg) {
+        return failure(e);
+    }
+    attempt(&cfg, action).await
 }
 fn acquire(action: Action) -> io::Result<Option<File>> {
     let dir = xdg("XDG_CACHE_HOME", ".cache").join("waybar-tapo");
@@ -331,12 +427,8 @@ fn import_config(source: &Path) -> Result<(), &'static str> {
     Ok(())
 }
 
-fn set_ip(value: &str) -> Result<(), &'static str> {
-    value.parse::<IpAddr>().map_err(|_| "Invalid IP address.")?;
-    let path = config_path();
-    let mut cfg = Config::read(&path)?;
-    cfg.device_ip = value.to_owned();
-    let data = serde_json::to_vec(&cfg).map_err(|_| "Cannot encode Tapo configuration.")?;
+fn write_config(path: &Path, cfg: &Config) -> Result<(), &'static str> {
+    let data = serde_json::to_vec(cfg).map_err(|_| "Cannot encode Tapo configuration.")?;
     let temp = path.with_extension("json.new");
     let mut file = OpenOptions::new()
         .write(true)
@@ -349,6 +441,15 @@ fn set_ip(value: &str) -> Result<(), &'static str> {
         .and_then(|_| file.sync_all())
         .map_err(|_| "Cannot write Tapo configuration.")?;
     fs::rename(temp, path).map_err(|_| "Cannot replace Tapo configuration.")?;
+    Ok(())
+}
+
+fn set_ip(value: &str) -> Result<(), &'static str> {
+    value.parse::<IpAddr>().map_err(|_| "Invalid IP address.")?;
+    let path = config_path();
+    let mut cfg = Config::read(&path)?;
+    cfg.device_ip = value.to_owned();
+    write_config(&path, &cfg)?;
     println!("Tapo device address updated.");
     Ok(())
 }
@@ -369,9 +470,24 @@ async fn main() {
         }
         return;
     }
+    if args.first().is_some_and(|v| v == "--discover") && args.len() == 1 {
+        match discover(DISCOVERY_WINDOW, false) {
+            Ok(found) if found.is_empty() => println!("No Tapo devices responded."),
+            Ok(found) => {
+                for d in found {
+                    println!("{:15}  {:12}  {}", d.ip, d.device_model, d.mac);
+                }
+            }
+            Err(_) => {
+                eprintln!("Cannot send the discovery probe.");
+                std::process::exit(1);
+            }
+        }
+        return;
+    }
     if args.first().is_some_and(|v| v == "--help") {
         println!(
-            "waybar-tapo [status|color|warm|toggle|brighter|dimmer]\nwaybar-tapo --import-config PATH\nwaybar-tapo --set-ip ADDRESS"
+            "waybar-tapo [status|color|warm|toggle|brighter|dimmer]\nwaybar-tapo --discover\nwaybar-tapo --import-config PATH\nwaybar-tapo --set-ip ADDRESS"
         );
         return;
     }
@@ -498,6 +614,48 @@ mod tests {
         }));
         assert_eq!(out.class, "error");
         assert!(!out.tooltip.contains("secret"));
+    }
+
+    fn datagram(body: &[u8]) -> Vec<u8> {
+        let mut packet = vec![0; 16];
+        packet.extend_from_slice(body);
+        packet
+    }
+    #[test]
+    fn discovery_query_is_the_documented_probe() {
+        // Version 2, op_code 1, then the fixed CRC32 over the placeholder header.
+        assert_eq!(&DISCOVERY_QUERY[..4], &[0x02, 0x00, 0x00, 0x01]);
+        assert_eq!(&DISCOVERY_QUERY[12..], &[0x46, 0x3c, 0xb5, 0xd3]);
+    }
+    #[test]
+    fn parses_reply_and_only_adopts_the_strip() {
+        let packet = datagram(
+            br#"{"result":{"device_id":"abc","device_type":"SMART.TAPOBULB",
+            "device_model":"L900-5(EU)","ip":"192.168.1.3","mac":"54-AF-97-B1-F5-53"},
+            "error_code":0}"#,
+        );
+        let found = parse_discovery(&packet, "192.168.1.3".parse().unwrap()).unwrap();
+        assert_eq!(found.ip, "192.168.1.3");
+        assert_eq!(found.mac, "54-AF-97-B1-F5-53");
+        assert!(found.is_l900());
+        // Another Tapo device on the same network must not be adopted.
+        let packet = datagram(br#"{"result":{"device_model":"P110(EU)","ip":"192.168.1.8"}}"#);
+        let other = parse_discovery(&packet, "192.168.1.8".parse().unwrap()).unwrap();
+        assert!(!other.is_l900());
+    }
+    #[test]
+    fn discovery_rejects_short_and_malformed_datagrams() {
+        let src: IpAddr = "192.168.1.3".parse().unwrap();
+        assert!(parse_discovery(&[0; 8], src).is_none());
+        assert!(parse_discovery(&[0; 16], src).is_none());
+        assert!(parse_discovery(&datagram(b"not json"), src).is_none());
+        assert!(parse_discovery(&datagram(br#"{"error_code":-1}"#), src).is_none());
+    }
+    #[test]
+    fn discovery_falls_back_to_the_source_address() {
+        let packet = datagram(br#"{"result":{"device_model":"L900-5(EU)","ip":""}}"#);
+        let found = parse_discovery(&packet, "192.168.1.77".parse().unwrap()).unwrap();
+        assert_eq!(found.ip, "192.168.1.77");
     }
 
     #[test]

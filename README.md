@@ -24,7 +24,21 @@ An existing controller file can be imported without overwriting local settings:
 waybar-tapo --import-config /path/to/config.json
 ```
 
-Use `waybar-tapo --set-ip ADDRESS` after a DHCP address change.
+## Discovery
+
+The strip is found by broadcasting a TP-Link TDP probe to `255.255.255.255:20002`.
+The query is a fixed sixteen-byte header, so no key exchange is needed, and
+devices answer with that header followed by plaintext JSON.
+
+```sh
+waybar-tapo --discover
+```
+
+A status or control request that fails to reach the stored address re-probes
+automatically, and adopts the first `L900` that answers at a different address,
+rewriting `tapo.json` in place. A DHCP lease change therefore heals itself
+within one Waybar poll. `waybar-tapo --set-ip ADDRESS` still sets the address by
+hand.
 
 ## Commands
 
