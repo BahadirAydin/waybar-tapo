@@ -15,8 +15,8 @@ use std::{
 use tapo::{ApiClient, Error, HandlerExt, TapoResponseError};
 
 const CONTROLS: &str = "Left: white / warm · Middle: warm\nRight: on/off · Scroll: brightness ±5%\nColor and brightness controls turn the LED on.";
-const WARM_HUE: u16 = 20;
-const WARM_SATURATION: u8 = 80;
+const WARM_HUE: u16 = 28;
+const WARM_SATURATION: u8 = 32;
 const WARM_VALUE: u8 = 100;
 // TP-Link TDP probe: version 2, op_code 1 (probe), empty payload. The last
 // four bytes are the CRC32 of the header with 0x5a6b7c8d sitting in that slot,
@@ -121,6 +121,7 @@ enum Action {
     Status,
     Color,
     Warm,
+    Temperature(u16),
     Toggle,
     Brighter,
     Dimmer,
@@ -312,6 +313,10 @@ fn payload(state: &State, action: Action) -> Result<Value, &'static str> {
                 )
             }
         }
+        Action::Temperature(color_temp) => Ok(
+            json!({"device_on":true,"brightness":state.brightness.clamp(1,100),
+            "color_temp":color_temp}),
+        ),
         _ => Err("Status does not change the device."),
     }
 }
@@ -487,13 +492,25 @@ async fn main() {
     }
     if args.first().is_some_and(|v| v == "--help") {
         println!(
-            "waybar-tapo [status|color|warm|toggle|brighter|dimmer]\nwaybar-tapo --discover\nwaybar-tapo --import-config PATH\nwaybar-tapo --set-ip ADDRESS"
+            "waybar-tapo [status|color|warm|toggle|brighter|dimmer]\nwaybar-tapo temperature KELVIN (2500-6500)\nwaybar-tapo --discover\nwaybar-tapo --import-config PATH\nwaybar-tapo --set-ip ADDRESS"
         );
         return;
     }
-    let Some(action) = Action::parse(args.first().map(String::as_str).unwrap_or("status"))
-        .filter(|_| args.len() <= 1)
-    else {
+    let action = if args.len() == 2
+        && matches!(
+            args.first().map(String::as_str),
+            Some("temperature" | "kelvin")
+        ) {
+        match args[1].parse::<u16>() {
+            Ok(value @ 2500..=6500) => Some(Action::Temperature(value)),
+            _ => None,
+        }
+    } else if args.len() <= 1 {
+        Action::parse(args.first().map(String::as_str).unwrap_or("status"))
+    } else {
+        None
+    };
+    let Some(action) = action else {
         eprintln!("Unknown action. Use --help.");
         std::process::exit(2);
     };
@@ -548,7 +565,10 @@ mod tests {
         s.hue = Some(WARM_HUE);
         s.saturation = Some(u16::from(WARM_SATURATION));
         let out = s.describe();
-        assert!(out.text.contains("#ff7733"));
+        assert!(
+            out.text
+                .contains(&color_hex(WARM_HUE, u16::from(WARM_SATURATION)))
+        );
         assert!(out.tooltip.contains("near Warm"));
         s.device_on = false;
         assert_eq!(s.describe().class, "off");
@@ -600,9 +620,14 @@ mod tests {
         let p = payload(&s, Action::Dimmer).unwrap();
         assert_eq!(p["brightness"], 1);
         assert_eq!(p["device_on"], true);
+        let p = payload(&s, Action::Temperature(2700)).unwrap();
+        assert_eq!(p["color_temp"], 2700);
+        assert_eq!(p["brightness"], 1);
+        assert_eq!(p["device_on"], true);
         assert_eq!(payload(&s, Action::Toggle).unwrap()["device_on"], true);
         s.dynamic_light_effect_enable = true;
         assert!(payload(&s, Action::Color).is_err());
+        assert!(payload(&s, Action::Temperature(3000)).is_err());
         assert!(payload(&s, Action::Toggle).is_ok());
         assert!(payload(&s, Action::Status).is_err());
     }

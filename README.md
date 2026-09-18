@@ -43,11 +43,21 @@ hand.
 ## Commands
 
 Running without arguments returns status. `color` switches between white and
-the chosen warm preset, HSV `(20, 80, 100)`; `warm` selects it directly.
-`toggle` changes power, and
+the chosen HSV warm preset; `warm` selects it directly. `toggle` changes power,
+and
 `brighter`/`dimmer` adjust brightness by five percentage points. Brightness is
 kept between 1 and 100 percent. Requests are serialized so fast scrolling does
 not queue changes.
+
+Set the strip's native white color temperature with a Kelvin value in the
+L900's supported 2500–6500K range:
+
+```sh
+waybar-tapo temperature 3000
+```
+
+`kelvin` is accepted as an alias for `temperature`. Setting a temperature turns
+the strip on, preserves its current brightness, and switches it out of HSV mode.
 
 The companion Waybar configuration and setup script live in the
 [dotfiles repository](https://github.com/BahadirAydin/dotfiles) under
