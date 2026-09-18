@@ -14,7 +14,9 @@ use std::{
 };
 use tapo::{ApiClient, Error, HandlerExt, TapoResponseError};
 
-const CONTROLS: &str = "Left: white / warm · Middle: warm\nRight: on/off · Scroll: brightness ±5%\nColor and brightness controls turn the LED on.";
+const CONTROLS: &str = "Left: 2500K / 6500K · Middle: warm\nRight: on/off · Scroll: brightness ±5%\nColor and brightness controls turn the LED on.";
+const WARM_WHITE_TEMPERATURE: u16 = 2500;
+const COOL_WHITE_TEMPERATURE: u16 = 6500;
 const WARM_HUE: u16 = 28;
 const WARM_SATURATION: u8 = 32;
 const WARM_VALUE: u8 = 100;
@@ -298,21 +300,19 @@ fn payload(state: &State, action: Action) -> Result<Value, &'static str> {
                 json!({"device_on":true,"brightness":(i16::from(state.brightness)+delta).clamp(1,100)}),
             )
         }
-        Action::Color | Action::Warm => {
-            let is_warm = state.color_temp == 0
-                && state.color() == Some((WARM_HUE, u16::from(WARM_SATURATION)));
-            if action == Action::Warm || !is_warm {
-                Ok(json!({"device_on":true,"brightness":WARM_VALUE,
-                    "color_temp":0,"hue":WARM_HUE,"saturation":WARM_SATURATION}))
+        Action::Color => {
+            let color_temp = if state.color_temp == WARM_WHITE_TEMPERATURE {
+                COOL_WHITE_TEMPERATURE
             } else {
-                // RGB white is represented by zero saturation. The library's
-                // builder rejects that value, but the authenticated API accepts it.
-                Ok(
-                    json!({"device_on":true,"brightness":state.brightness.clamp(1,100),
-                    "color_temp":0,"hue":0,"saturation":0}),
-                )
-            }
+                WARM_WHITE_TEMPERATURE
+            };
+            Ok(
+                json!({"device_on":true,"brightness":state.brightness.clamp(1,100),
+                "color_temp":color_temp}),
+            )
         }
+        Action::Warm => Ok(json!({"device_on":true,"brightness":WARM_VALUE,
+            "color_temp":0,"hue":WARM_HUE,"saturation":WARM_SATURATION})),
         Action::Temperature(color_temp) => Ok(
             json!({"device_on":true,"brightness":state.brightness.clamp(1,100),
             "color_temp":color_temp}),
@@ -591,24 +591,16 @@ mod tests {
     fn actions_preserve_brightness_and_white() {
         let mut s = state();
         let p = payload(&s, Action::Color).unwrap();
-        assert_eq!(p["hue"], WARM_HUE);
-        assert_eq!(p["saturation"], WARM_SATURATION);
-        assert_eq!(p["brightness"], WARM_VALUE);
+        assert_eq!(p["color_temp"], WARM_WHITE_TEMPERATURE);
+        assert_eq!(p["brightness"], 50);
         assert_eq!(payload(&s, Action::Warm).unwrap()["brightness"], WARM_VALUE);
-        s.color_temp = 0;
-        s.hue = Some(WARM_HUE);
-        s.saturation = Some(u16::from(WARM_SATURATION));
+        s.color_temp = WARM_WHITE_TEMPERATURE;
         let p = payload(&s, Action::Color).unwrap();
-        assert_eq!(p["saturation"], 0);
-        assert_eq!(p["color_temp"], 0);
-        assert_eq!(p["hue"], 0);
-        s.color_temp = 0;
-        s.hue = Some(0);
-        s.saturation = Some(0);
+        assert_eq!(p["color_temp"], COOL_WHITE_TEMPERATURE);
+        assert_eq!(p["brightness"], 50);
+        s.color_temp = COOL_WHITE_TEMPERATURE;
         let p = payload(&s, Action::Color).unwrap();
-        assert_eq!(p["hue"], WARM_HUE);
-        assert_eq!(p["saturation"], WARM_SATURATION);
-        assert_eq!(p["brightness"], WARM_VALUE);
+        assert_eq!(p["color_temp"], WARM_WHITE_TEMPERATURE);
     }
     #[test]
     fn bounds_power_and_effect_guard() {

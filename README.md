@@ -42,9 +42,9 @@ hand.
 
 ## Commands
 
-Running without arguments returns status. `color` switches between white and
-the chosen HSV warm preset; `warm` selects it directly. `toggle` changes power,
-and
+Running without arguments returns status. `color` switches between the L900's
+native 2500K and 6500K white temperatures. `warm` selects the HSV warm preset.
+`toggle` changes power, and
 `brighter`/`dimmer` adjust brightness by five percentage points. Brightness is
 kept between 1 and 100 percent. Requests are serialized so fast scrolling does
 not queue changes.
